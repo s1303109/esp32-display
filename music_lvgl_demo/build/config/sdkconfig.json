@@ -1100,7 +1100,7 @@
     "LV_USE_THORVG": false,
     "LV_USE_TILEVIEW": true,
     "LV_USE_TINY_TTF": false,
-    "LV_USE_TJPGD": false,
+    "LV_USE_TJPGD": true,
     "LV_USE_VECTOR_GRAPHIC": false,
     "LV_USE_WAYLAND": false,
     "LV_USE_WIN": true,

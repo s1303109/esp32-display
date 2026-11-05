@@ -37,7 +37,9 @@ def load_bridge():
     cover = ModuleType("cover")
     cover.COVER_BYTES = 33800
     cover.COVER_SIZE = (130, 130)
+    cover.JPEG_MAX_BYTES = 32768
     cover.convert_cover = lambda data: data
+    cover.convert_cover_jpeg = lambda data: b"\xff\xd8" + data
     imports = {
         "bleak": bleak,
         "winrt": winrt,

@@ -15,6 +15,8 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lvgl.h"
+#include "src/libs/tjpgd/tjpgd.h"
+#include "glyph_font.h"
 #include "music_ble.h"
 #include "music_ui.h"
 #include "touch_xpt2046.h"
@@ -23,6 +25,7 @@
 #define LCD_HRES 320
 #define LCD_VRES 240
 #define DRAW_LINES 32
+#define LCD_FRAME_BYTES (LCD_HRES * LCD_VRES * sizeof(lv_color16_t))
 #define PIN_LCD_SCLK 12
 #define PIN_LCD_MOSI 11
 #define PIN_LCD_MISO 13
@@ -31,8 +34,19 @@
 #define PIN_LCD_RESET 8
 #define METADATA_WAIT_FOR_PLAYBACK_MS 250
 #define METADATA_COVER_FALLBACK_MS 4500
+#define JPEG_WORKSPACE_BYTES 4096
+
+#if !LV_USE_TJPGD || JD_FORMAT != 0
+#error "JPEG cover decoding requires LVGL TJpgDec with BGR888 MCU output"
+#endif
 
 static const char *TAG = "music_demo";
+// A complete track change is rendered into this PSRAM DMA frame first. The
+// panel then receives one continuous full-screen transfer, instead of eight
+// visible 32-line partial transfers separated by LVGL render work.
+static uint8_t *s_frame_transfer;
+static bool s_full_frame_pending;
+static uint8_t jpeg_workspace[JPEG_WORKSPACE_BYTES] __attribute__((aligned(4)));
 
 typedef struct {
     music_ui_t *ui;
@@ -240,6 +254,142 @@ static void apply_visible_playback(music_ui_t *ui, touch_context_t *ctx,
     }
 }
 
+static void stage_metadata(pending_track_t *pending,
+                            const music_ble_metadata_t *metadata)
+{
+    if (pending->active &&
+        pending->metadata.message_id == metadata->message_id) {
+        // Windows may fill in the album after the title and artist. Keep the
+        // already received cover and playback for this same song ID.
+        pending->metadata = *metadata;
+        return;
+    }
+    // A newer message ID supersedes the entire incomplete song. No old cover
+    // or playback is allowed to pair with this metadata.
+    pending->metadata = *metadata;
+    pending->started_tick = lv_tick_get();
+    pending->active = true;
+    pending->cover_ready = false;
+    pending->cover_clear = false;
+    pending->playback_ready = false;
+    ESP_LOGI(TAG, "BLE metadata staged: id=%u, %s / %s / %s",
+             (unsigned)metadata->message_id, metadata->title,
+             metadata->artist, metadata->album);
+}
+
+typedef struct {
+    const uint8_t *jpeg;
+    size_t jpeg_size;
+    size_t offset;
+    uint8_t *rgb565;
+} jpeg_decode_io_t;
+
+static size_t jpeg_read_cb(JDEC *decoder, uint8_t *buffer, size_t requested)
+{
+    jpeg_decode_io_t *io = decoder->device;
+    const size_t remaining = io->jpeg_size - io->offset;
+    const size_t count = requested < remaining ? requested : remaining;
+    if (buffer != NULL && count != 0) {
+        memcpy(buffer, io->jpeg + io->offset, count);
+    }
+    io->offset += count;
+    return count;
+}
+
+static int jpeg_write_cb(JDEC *decoder, void *bitmap, JRECT *rect)
+{
+    jpeg_decode_io_t *io = decoder->device;
+    if (rect->left > rect->right || rect->top > rect->bottom ||
+        rect->right >= MUSIC_BLE_COVER_WIDTH ||
+        rect->bottom >= MUSIC_BLE_COVER_HEIGHT) {
+        return 0;
+    }
+
+    // TJpgDec's JD_FORMAT=0 output is packed B, G, R bytes per MCU pixel.
+    const uint8_t *source = bitmap;
+    for (uint16_t y = rect->top; y <= rect->bottom; y++) {
+        uint8_t *dest = io->rgb565 +
+                        ((size_t)y * MUSIC_BLE_COVER_WIDTH + rect->left) * 2;
+        for (uint16_t x = rect->left; x <= rect->right; x++) {
+            const uint16_t rgb565 =
+                ((uint16_t)(source[2] & 0xf8) << 8) |
+                ((uint16_t)(source[1] & 0xfc) << 3) |
+                (uint16_t)(source[0] >> 3);
+            dest[0] = (uint8_t)rgb565;
+            dest[1] = (uint8_t)(rgb565 >> 8);
+            dest += 2;
+            source += 3;
+        }
+    }
+    return 1;
+}
+
+static bool prepare_cover_rgb565(const music_ble_cover_t *cover, uint8_t *dest)
+{
+    if (cover->format == MUSIC_BLE_COVER_FORMAT_RGB565 &&
+        cover->pixels != NULL && cover->size == MUSIC_BLE_COVER_BYTES) {
+        memcpy(dest, cover->pixels, cover->size);
+        return true;
+    }
+    if (cover->format != MUSIC_BLE_COVER_FORMAT_JPEG || cover->pixels == NULL ||
+        cover->size < 4 || cover->size > MUSIC_BLE_JPEG_MAX_BYTES ||
+        cover->pixels[0] != 0xff || cover->pixels[1] != 0xd8) {
+        return false;
+    }
+
+    jpeg_decode_io_t io = {
+        .jpeg = cover->pixels,
+        .jpeg_size = cover->size,
+        .rgb565 = dest,
+    };
+    JDEC decoder;
+    JRESULT result = jd_prepare(&decoder, jpeg_read_cb, jpeg_workspace,
+                                sizeof(jpeg_workspace), &io);
+    if (result == JDR_OK &&
+        (decoder.width != MUSIC_BLE_COVER_WIDTH ||
+         decoder.height != MUSIC_BLE_COVER_HEIGHT)) {
+        result = JDR_FMT2;
+    }
+    if (result == JDR_OK) result = jd_decomp(&decoder, jpeg_write_cb, 0);
+    if (result != JDR_OK) {
+        ESP_LOGW(TAG, "JPEG cover decode failed: result=%d, bytes=%u",
+                 (int)result, (unsigned)cover->size);
+    }
+    return result == JDR_OK;
+}
+
+static void receive_glyph_assets(glyph_font_store_t *fonts, music_ui_t *ui,
+                                 const pending_track_t *pending,
+                                 bool have_visible_track, uint8_t visible_track_id)
+{
+    music_ble_glyph_asset_t asset;
+    while (music_ble_try_get_glyph_asset(&asset)) {
+        if (pending->active && have_visible_track &&
+            asset.track_id == visible_track_id &&
+            asset.track_id != pending->metadata.message_id) {
+            continue;
+        }
+        if (!glyph_font_stage(fonts, asset.track_id, asset.data, asset.size)) {
+            ESP_LOGW(TAG, "GLY1 asset rejected: id=%u, bytes=%u",
+                     (unsigned)asset.track_id, (unsigned)asset.size);
+            continue;
+        }
+        ESP_LOGI(TAG, "GLY1 staged: id=%u, glyphs=%u, bytes=%u",
+                 (unsigned)asset.track_id,
+                 (unsigned)fonts->sets[fonts->staged_index].count,
+                 (unsigned)asset.size);
+        if (!pending->active && have_visible_track &&
+            asset.track_id == visible_track_id) {
+            glyph_font_commit(fonts, visible_track_id);
+            music_ui_set_text_fonts(ui, glyph_font_active_20(fonts),
+                                    glyph_font_active_14(fonts));
+            ESP_LOGI(TAG, "GLY1 visible updated: id=%u, glyphs=%u",
+                     (unsigned)visible_track_id,
+                     (unsigned)glyph_font_active_count(fonts));
+        }
+    }
+}
+
 static bool on_color_done(esp_lcd_panel_io_handle_t io,
                           esp_lcd_panel_io_event_data_t *event,
                           void *user_ctx)
@@ -253,6 +403,26 @@ static bool on_color_done(esp_lcd_panel_io_handle_t io,
 static void flush_cb(lv_display_t *display, const lv_area_t *area, uint8_t *pixels)
 {
     esp_lcd_panel_handle_t panel = lv_display_get_user_data(display);
+    if (s_full_frame_pending && s_frame_transfer != NULL) {
+        const uint32_t width = (uint32_t)(area->x2 - area->x1 + 1);
+        const uint32_t height = (uint32_t)(area->y2 - area->y1 + 1);
+        for (uint32_t row = 0; row < height; ++row) {
+            uint8_t *dst = s_frame_transfer +
+                           (((uint32_t)area->y1 + row) * LCD_HRES +
+                            (uint32_t)area->x1) * 2;
+            memcpy(dst, pixels + row * width * 2, width * 2);
+            lv_draw_sw_rgb565_swap(dst, width);
+        }
+        if (!lv_display_flush_is_last(display)) {
+            lv_display_flush_ready(display);
+            return;
+        }
+        s_full_frame_pending = false;
+        ESP_ERROR_CHECK(esp_lcd_panel_draw_bitmap(panel, 0, 0,
+                                                   LCD_HRES, LCD_VRES,
+                                                   s_frame_transfer));
+        return;
+    }
     const uint32_t count = (uint32_t)(area->x2 - area->x1 + 1) *
                            (uint32_t)(area->y2 - area->y1 + 1);
     lv_draw_sw_rgb565_swap(pixels, count);
@@ -277,6 +447,9 @@ void app_main(void)
         .miso_io_num = PIN_LCD_MISO,
         .quadwp_io_num = -1,
         .quadhd_io_num = -1,
+        // A single 153,600-byte SPI DMA descriptor truncated this ILI9341
+        // module's lower half. Let esp_lcd split the already composed frame
+        // into proven 20,480-byte transactions without LVGL render pauses.
         .max_transfer_sz = LCD_HRES * DRAW_LINES * 2,
     };
     ESP_ERROR_CHECK(spi_bus_initialize(LCD_HOST, &bus_cfg, SPI_DMA_CH_AUTO));
@@ -319,6 +492,12 @@ void app_main(void)
     lv_display_set_user_data(display, panel);
     lv_display_set_flush_cb(display, flush_cb);
 
+    s_frame_transfer = heap_caps_aligned_alloc(
+        64, LCD_FRAME_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA | MALLOC_CAP_8BIT);
+    ESP_LOGI(TAG, "Full-frame DMA buffer: %s, bytes=%u",
+             s_frame_transfer ? "ready" : "unavailable",
+             (unsigned)LCD_FRAME_BYTES);
+
     const esp_lcd_panel_io_callbacks_t cbs = {.on_color_trans_done = on_color_done};
     ESP_ERROR_CHECK(esp_lcd_panel_io_register_event_callbacks(io, &cbs, display));
 
@@ -329,6 +508,8 @@ void app_main(void)
 
     static music_ui_t ui;
     music_ui_create(lv_screen_active(), &ui);
+    static glyph_font_store_t glyph_fonts;
+    ESP_ERROR_CHECK(glyph_font_store_init(&glyph_fonts));
 
     // The BLE receiver may reuse either of its transfer buffers on a rapid
     // series of skips. Keep display-owned art stable until LVGL switches to a
@@ -369,68 +550,143 @@ void app_main(void)
              (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL),
              (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
 
-    uint8_t current_metadata_id = 0;
-    bool have_metadata = false;
+    static pending_track_t pending;
+    uint8_t visible_track_id = 0;
+    bool have_visible_track = false;
+    if (s_frame_transfer != NULL) {
+        lv_obj_invalidate(ui.card);
+        s_full_frame_pending = true;
+    }
     while (true) {
+        receive_glyph_assets(&glyph_fonts, &ui, &pending,
+                             have_visible_track, visible_track_id);
         music_ble_metadata_t update;
         while (music_ble_try_get_update(&update)) {
-            // Keep the previous art visible until the new art has arrived.
-            music_ui_set_playback(&ui, 0, false, 0, 0);
-            current_metadata_id = update.message_id;
-            have_metadata = true;
-            touch_ctx.current_track_id = update.message_id;
-            touch_ctx.current_duration_ms = 0;
-            touch_ctx.timeline_valid = false;
-            touch_ctx.progress_pending = false;
-            touch_ctx.seek_hold_until = 0;
-            lv_label_set_text(ui.title, update.title[0] ? update.title : "No music");
-            lv_label_set_text(ui.artist, update.artist);
-            lv_label_set_text(ui.source, update.album[0] ? update.album : "YOUTUBE MUSIC");
-            ESP_LOGI(TAG, "BLE metadata: %s / %s / %s",
-                     update.title, update.artist, update.album);
+            if (!pending.active && have_visible_track &&
+                update.message_id == visible_track_id) {
+                lv_label_set_text(ui.title, update.title[0]
+                                             ? update.title : "No music");
+                lv_label_set_text(ui.artist, update.artist);
+                lv_label_set_text(ui.source, update.album[0]
+                                              ? update.album : "YOUTUBE MUSIC");
+            } else {
+                stage_metadata(&pending, &update);
+            }
         }
         music_ble_cover_t cover;
         while (music_ble_try_get_cover(&cover)) {
-            if (!have_metadata || cover.image_id != current_metadata_id) continue;
-            bool updated = false;
-            if (cover.pixels == NULL && cover.size == 0) {
-                updated = music_ui_set_cover(&ui, NULL, 0);
-            } else if (cover.pixels != NULL && cover.size == MUSIC_BLE_COVER_BYTES) {
-                memcpy(display_art[next_display_art], cover.pixels, cover.size);
-                updated = music_ui_set_cover(&ui, display_art[next_display_art], cover.size);
-                if (updated) next_display_art ^= 1u;
-            }
-            if (updated) {
-                ESP_LOGI(TAG, "BLE cover: %u bytes, id=%u",
-                         (unsigned)cover.size, (unsigned)cover.image_id);
+            const bool clear = cover.format == MUSIC_BLE_COVER_FORMAT_CLEAR &&
+                               cover.pixels == NULL && cover.size == 0;
+            const bool image = cover.format == MUSIC_BLE_COVER_FORMAT_RGB565 ||
+                               cover.format == MUSIC_BLE_COVER_FORMAT_JPEG;
+            if (!clear && !image) continue;
+            if (pending.active && cover.image_id == pending.metadata.message_id) {
+                if (image && !prepare_cover_rgb565(
+                                 &cover, display_art[next_display_art])) continue;
+                pending.cover_ready = true;
+                pending.cover_clear = clear;
+                ESP_LOGI(TAG, "BLE cover staged: %u bytes, id=%u, format=%u",
+                         (unsigned)cover.size, (unsigned)cover.image_id,
+                         (unsigned)cover.format);
+            } else if (!pending.active && have_visible_track &&
+                       cover.image_id == visible_track_id) {
+                // The artwork can change without a metadata change. In this
+                // case title and cover already refer to the same song.
+                bool applied = false;
+                if (clear) {
+                    applied = music_ui_set_cover(&ui, NULL, 0);
+                } else if (prepare_cover_rgb565(
+                               &cover, display_art[next_display_art])) {
+                    applied = music_ui_set_cover(&ui, display_art[next_display_art],
+                                                 MUSIC_BLE_COVER_BYTES);
+                    if (applied) next_display_art ^= 1u;
+                }
+                if (applied) {
+                    ESP_LOGI(TAG, "BLE visible cover updated: %u bytes, id=%u, format=%u",
+                             (unsigned)cover.size, (unsigned)cover.image_id,
+                             (unsigned)cover.format);
+                }
             }
         }
         music_ble_playback_t playback;
         while (music_ble_try_get_playback(&playback)) {
-            if (have_metadata && playback.track_id == current_metadata_id) {
-                touch_ctx.timeline_valid = playback.timeline_valid;
-                touch_ctx.current_duration_ms = playback.duration_ms;
-                // Keep the play/pause icon current even while the position
-                // slider waits for Windows to apply a seek. The old blanket
-                // hold made the button appear stuck after dragging.
-                music_ui_set_play_state(&ui, playback.state);
-                if (touch_ctx.seek_hold_until != 0 && playback.timeline_valid) {
-                    const uint32_t delta = playback.elapsed_ms > touch_ctx.seek_target_ms
-                                               ? playback.elapsed_ms - touch_ctx.seek_target_ms
-                                               : touch_ctx.seek_target_ms - playback.elapsed_ms;
-                    if (delta <= 1500) touch_ctx.seek_hold_until = 0;
+            if (pending.active && playback.track_id == pending.metadata.message_id) {
+                pending.playback = playback;
+                pending.playback_ready = true;
+            } else if (!pending.active && have_visible_track &&
+                       playback.track_id == visible_track_id) {
+                apply_visible_playback(&ui, &touch_ctx, &playback);
+            }
+        }
+        // Metadata is a one-slot overwrite queue. Recheck just before commit
+        // so a rapid second skip supersedes the first pending song.
+        while (music_ble_try_get_update(&update)) {
+            if (!pending.active && have_visible_track &&
+                update.message_id == visible_track_id) {
+                lv_label_set_text(ui.title, update.title[0]
+                                             ? update.title : "No music");
+                lv_label_set_text(ui.artist, update.artist);
+                lv_label_set_text(ui.source, update.album[0]
+                                              ? update.album : "YOUTUBE MUSIC");
+            } else {
+                stage_metadata(&pending, &update);
+            }
+        }
+        receive_glyph_assets(&glyph_fonts, &ui, &pending,
+                             have_visible_track, visible_track_id);
+        if (pending.active) {
+            const uint32_t age_ms = lv_tick_get() - pending.started_tick;
+            const bool cover_and_playback_ready =
+                pending.cover_ready &&
+                (pending.playback_ready || age_ms >= METADATA_WAIT_FOR_PLAYBACK_MS);
+            const bool cover_timed_out = age_ms >= METADATA_COVER_FALLBACK_MS;
+            if (cover_and_playback_ready || cover_timed_out) {
+                bool cover_applied = false;
+                if (pending.cover_ready && !pending.cover_clear) {
+                    cover_applied = music_ui_set_cover(&ui,
+                                                       display_art[next_display_art],
+                                                       MUSIC_BLE_COVER_BYTES);
+                    if (cover_applied) next_display_art ^= 1u;
                 }
-                if (!touch_ctx.progress_dragging &&
-                    (int32_t)(lv_tick_get() - touch_ctx.seek_hold_until) >= 0) {
-                    music_ui_set_playback(&ui, playback.state, playback.timeline_valid,
-                                          playback.elapsed_ms, playback.duration_ms);
+                if (!cover_applied) {
+                    // On a missing cover, clear the previous song's art before
+                    // publishing the new title. Both changes render together.
+                    music_ui_set_cover(&ui, NULL, 0);
                 }
-                if (playback.volume_valid && !touch_ctx.volume_dragging &&
-                    (int32_t)(lv_tick_get() - touch_ctx.volume_hold_until) >= 0) {
-                    touch_ctx.applying_volume = true;
-                    music_ui_set_volume(&ui, playback.volume_percent);
-                    touch_ctx.applying_volume = false;
+                const bool glyphs_active = glyph_font_commit(
+                    &glyph_fonts, pending.metadata.message_id);
+                music_ui_set_text_fonts(&ui,
+                                        glyph_font_active_20(&glyph_fonts),
+                                        glyph_font_active_14(&glyph_fonts));
+                lv_label_set_text(ui.title, pending.metadata.title[0]
+                                             ? pending.metadata.title : "No music");
+                lv_label_set_text(ui.artist, pending.metadata.artist);
+                lv_label_set_text(ui.source, pending.metadata.album[0]
+                                              ? pending.metadata.album : "YOUTUBE MUSIC");
+                visible_track_id = pending.metadata.message_id;
+                have_visible_track = true;
+                touch_ctx.current_track_id = visible_track_id;
+                touch_ctx.current_duration_ms = 0;
+                touch_ctx.timeline_valid = false;
+                touch_ctx.progress_dragging = false;
+                touch_ctx.progress_pending = false;
+                touch_ctx.seek_hold_until = 0;
+                if (pending.playback_ready) {
+                    apply_visible_playback(&ui, &touch_ctx, &pending.playback);
+                } else {
+                    music_ui_set_playback(&ui, 0, false, 0, 0);
                 }
+                ESP_LOGI(TAG, "BLE track committed: id=%u, cover=%s, playback=%s, glyphs=%u",
+                         (unsigned)visible_track_id,
+                         pending.cover_ready ? (pending.cover_clear ? "clear" : "image")
+                                             : "timeout",
+                         pending.playback_ready ? "ready" : "pending",
+                         glyphs_active ? (unsigned)glyph_font_active_count(&glyph_fonts) : 0u);
+                if (s_frame_transfer != NULL) {
+                    lv_obj_invalidate(ui.card);
+                    s_full_frame_pending = true;
+                }
+                pending.active = false;
             }
         }
         if (touch_ctx.volume_visible && !touch_ctx.volume_dragging &&

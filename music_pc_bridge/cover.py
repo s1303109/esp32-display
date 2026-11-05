@@ -8,18 +8,37 @@ from PIL import Image, ImageOps
 
 COVER_SIZE = (130, 130)
 COVER_BYTES = COVER_SIZE[0] * COVER_SIZE[1] * 2
+JPEG_MAX_BYTES = 32768
 
 
-def convert_cover(data: bytes) -> bytes:
-    """Center-crop and encode an image as 130×130 RGB565 little-endian."""
+def _fit_cover(data: bytes) -> Image.Image:
     with Image.open(BytesIO(data)) as source:
         if source.width * source.height > 16_000_000:
             raise ValueError("thumbnail dimensions are unexpectedly large")
         oriented = ImageOps.exif_transpose(source)
-        image = ImageOps.fit(
-            oriented.convert("RGB"), COVER_SIZE, method=Image.Resampling.LANCZOS
+        return ImageOps.fit(
+            oriented.convert("RGB"), COVER_SIZE,
+            method=Image.Resampling.LANCZOS,
         )
-        rgb = image.tobytes()
+
+
+def convert_cover_jpeg(data: bytes) -> bytes:
+    """Make a small baseline JPEG for the ESP32's version 3 cover decoder."""
+    image = _fit_cover(data)
+    output = BytesIO()
+    # 4:4:4 preserves small album text and color edges at 130x130. The result
+    # is typically several KiB instead of 33,800 bytes of raw RGB565.
+    image.save(output, format="JPEG", quality=88, subsampling=0,
+               optimize=True, progressive=False)
+    result = output.getvalue()
+    if not 4 <= len(result) <= JPEG_MAX_BYTES:
+        raise ValueError(f"JPEG cover size {len(result)} is unsupported")
+    return result
+
+
+def convert_cover(data: bytes) -> bytes:
+    """Center-crop and encode an image as 130×130 RGB565 little-endian."""
+    rgb = _fit_cover(data).tobytes()
 
     result = bytearray(COVER_BYTES)
     for source_pos in range(0, len(rgb), 3):

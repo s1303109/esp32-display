@@ -1,0 +1,31 @@
+{
+  "format": 1,
+  "board": "ESP32-S3-WROOM-1-N16R8",
+  "display": "ILI9341 320x240 SPI + XPT2046 touch",
+  "flash": {
+    "chip": "esp32s3",
+    "mode": "dio",
+    "frequency": "80m",
+    "size": "16MB"
+  },
+  "images": [
+    {
+      "offset": "0x0",
+      "file": "bootloader.bin",
+      "size": 21056,
+      "sha256": "6f04a079f687b22430f3ea3bb39b499a8d4fb3f8cf66287863f38123858a0bcf"
+    },
+    {
+      "offset": "0x8000",
+      "file": "partition-table.bin",
+      "size": 3072,
+      "sha256": "7f00b6c042a89b15b0cac534f82ed988caf29278ff5700b0c511eb1b5bb7c820"
+    },
+    {
+      "offset": "0x10000",
+      "file": "music_lvgl_demo.bin",
+      "size": 884880,
+      "sha256": "5b625ccfc794d386be839502c82128c8b56c6f71c732c80ffbc66d7a335c0043"
+    }
+  ]
+}

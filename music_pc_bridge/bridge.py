@@ -16,10 +16,12 @@ from winrt.windows.media.control import (
 )
 from winrt.windows.storage.streams import Buffer, InputStreamOptions
 
-from cover import COVER_BYTES, COVER_SIZE, convert_cover
+from cover import COVER_BYTES, COVER_SIZE, JPEG_MAX_BYTES, convert_cover, convert_cover_jpeg
+from glyphs import GLYPH_MAX_BYTES, GlyphAsset, build_glyph_asset
 from timeline import PlaybackSource, project_playback, state_from_winrt
 from volume import get_volume_percent, set_volume_percent
-from wire import FAST_COVER_VERSION, encode_metadata, make_fast_cover_commit, make_frames
+from wire import (FAST_COVER_VERSION, GLYPH_VERSION, JPEG_COVER_VERSION, encode_metadata,
+                  make_fast_cover_commit, make_frames)
 
 DEVICE_NAME = "ESP32-Music-Display"
 SERVICE_UUID = "d1cb460f-4eea-4594-8a7a-b6da2cde9c9c"
@@ -27,6 +29,7 @@ METADATA_CHAR_UUID = "e947ddcd-4fe0-44ca-a75d-049bb2edc7be"
 COVER_CHAR_UUID = "0e60fb2f-ea19-4df2-a32a-19f81145ac17"
 PLAYBACK_CHAR_UUID = "9c950662-05e7-4e55-a39e-0658ccb0c8fb"
 CONTROL_CHAR_UUID = "4b717b37-4a03-4aa2-9dfc-a4bb88dfc905"
+GLYPH_CHAR_UUID = "9e74967b-6875-4000-8477-f25b93b58861"
 CONTROL_VERSION = 1
 CONTROL_PREVIOUS = 1
 CONTROL_PLAY_PAUSE = 2
@@ -39,6 +42,7 @@ MAX_THUMBNAIL_BYTES = 2 * 1024 * 1024
 MAX_COVER_FRAME_SIZE = 244
 MIN_FAST_COVER_FRAME_SIZE = 100
 COVER_CHECK_INTERVAL = 1.0
+MISSING_SESSION_GRACE = 1.0
 _UNCHECKED = object()
 
 
@@ -76,6 +80,15 @@ class ActiveTrack:
     """The song ID and metadata most recently committed to the ESP32."""
     track_id: int | None = None
     metadata: Metadata | None = None
+
+
+def track_key(metadata: Metadata) -> tuple[str, str]:
+    """Chrome may fill in the album after the song and artwork arrive."""
+    return metadata.title, metadata.artist
+
+
+def has_usable_track(reading: MediaReading | None) -> bool:
+    return reading is not None and bool(reading.metadata.title.strip())
 
 
 def chrome_sessions(manager: SessionManager) -> list:
@@ -386,6 +399,53 @@ async def send_metadata(client: BleakClient, value: Metadata, message_id: int) -
         await client.write_gatt_char(METADATA_CHAR_UUID, frame, response=True)
 
 
+async def send_glyphs(
+    client: BleakClient, asset: GlyphAsset, track_id: int,
+    frame_size: int, *, fast: bool,
+) -> None:
+    """Send a CRC-checked GLY1 asset before its matching metadata update."""
+    data = asset.payload
+    if not 6 <= len(data) <= GLYPH_MAX_BYTES or data[:4] != b"GLY1":
+        raise ValueError("invalid Unicode glyph asset")
+    started = time.perf_counter()
+    commit = make_fast_cover_commit(data, track_id, version=GLYPH_VERSION)
+    frames = 0
+    if fast:
+        try:
+            for frame in make_frames(
+                data, track_id, max_frame_size=frame_size,
+                max_message_size=GLYPH_MAX_BYTES, version=GLYPH_VERSION,
+            ):
+                await client.write_gatt_char(GLYPH_CHAR_UUID, frame, response=False)
+                frames += 1
+            await asyncio.sleep(0.04)
+            await client.write_gatt_char(GLYPH_CHAR_UUID, commit, response=True)
+        except Exception as exc:
+            print(f"Fast glyph transfer failed ({type(exc).__name__}: {exc}); retrying reliably.")
+            if not client.is_connected:
+                raise
+            # Old write commands can still be in WinRT's queue. Offset zero
+            # starts a fresh v4 assembly on the ESP after they drain.
+            await asyncio.sleep(0.10)
+            frames = 0
+        else:
+            elapsed = time.perf_counter() - started
+            print(f"Glyphs sent: {asset.glyph_count} glyphs, {len(data)} bytes, "
+                  f"{frames} fast writes + CRC, {elapsed:.2f}s")
+            return
+
+    for frame in make_frames(
+        data, track_id, max_frame_size=frame_size,
+        max_message_size=GLYPH_MAX_BYTES, version=GLYPH_VERSION,
+    ):
+        await client.write_gatt_char(GLYPH_CHAR_UUID, frame, response=True)
+        frames += 1
+    await client.write_gatt_char(GLYPH_CHAR_UUID, commit, response=True)
+    elapsed = time.perf_counter() - started
+    print(f"Glyphs sent: {asset.glyph_count} glyphs, {len(data)} bytes, "
+          f"{frames} reliable writes + CRC, {elapsed:.2f}s")
+
+
 async def send_playback(
     client: BleakClient, source: PlaybackSource | None, track_id: int,
     volume_percent: int | None = None,
@@ -462,6 +522,37 @@ async def send_cover(
           f"{elapsed:.2f}s ({rate:.1f} KiB/s)")
 
 
+async def send_jpeg_cover(
+    client: BleakClient, data: bytes, image_id: int, frame_size: int,
+    fast: bool,
+) -> None:
+    """Send a CRC-checked baseline JPEG; the ESP decodes after commit."""
+    if not 4 <= len(data) <= JPEG_MAX_BYTES:
+        raise ValueError("JPEG cover length is unsupported")
+    started = time.perf_counter()
+    frames = 0
+    for frame in make_frames(
+        data, image_id, max_frame_size=frame_size,
+        max_message_size=JPEG_MAX_BYTES, version=JPEG_COVER_VERSION,
+    ):
+        await client.write_gatt_char(COVER_CHAR_UUID, frame, response=not fast)
+        frames += 1
+    if fast:
+        # WinRT may buffer write commands. The response-bearing commit is the
+        # transport barrier; CRC and contiguous offsets guard the image.
+        await asyncio.sleep(0.04)
+    await client.write_gatt_char(
+        COVER_CHAR_UUID,
+        make_fast_cover_commit(data, image_id, version=JPEG_COVER_VERSION),
+        response=True,
+    )
+    elapsed = time.perf_counter() - started
+    rate = len(data) / 1024 / max(elapsed, 1e-6)
+    print(f"JPEG cover sent: {len(data)} bytes, {frames} "
+          f"{'fast' if fast else 'reliable'} writes + CRC, "
+          f"{elapsed:.2f}s ({rate:.1f} KiB/s)")
+
+
 async def clear_cover(client: BleakClient, image_id: int) -> None:
     frame = next(make_frames(b"", image_id, allow_empty=True))
     await client.write_gatt_char(COVER_CHAR_UUID, frame, response=True)
@@ -527,6 +618,12 @@ async def bridge(args: argparse.Namespace, manager: SessionManager) -> int:
                     raise RuntimeError("ESP32 cover GATT characteristic not found")
                 if "write" not in cover_characteristic.properties:
                     raise RuntimeError("ESP32 cover characteristic lacks write permission")
+                glyph_characteristic = client.services.get_characteristic(GLYPH_CHAR_UUID)
+                if glyph_characteristic is None:
+                    print("Unicode glyph characteristic unavailable; using existing text display.")
+                elif "write" not in glyph_characteristic.properties:
+                    print("Unicode glyph characteristic lacks write permission; using existing text display.")
+                    glyph_characteristic = None
                 playback_characteristic = client.services.get_characteristic(PLAYBACK_CHAR_UUID)
                 if playback_characteristic is None:
                     raise RuntimeError("ESP32 playback GATT characteristic not found")
@@ -604,6 +701,7 @@ async def bridge(args: argparse.Namespace, manager: SessionManager) -> int:
                 mtu = int(client.mtu_size)
                 cover_frame_size = min(MAX_COVER_FRAME_SIZE, max(20, mtu - 3))
                 fast_cover_available = "write-without-response" in cover_characteristic.properties
+                jpeg_available = True
                 print(
                     f"BLE connected. Negotiated MTU: {mtu}; "
                     f"cover write size: {cover_frame_size} bytes; "
@@ -611,14 +709,32 @@ async def bridge(args: argparse.Namespace, manager: SessionManager) -> int:
                 )
                 last_sent: Metadata | None = None
                 last_cover_key: object | bytes | None = _UNCHECKED
+                desired_glyph_asset: GlyphAsset | None = None
+                sent_glyph_payload: bytes | None = None
+                sent_glyph_track_id: int | None = None
+                last_glyph_error: str | None = None
+                next_glyph_retry = 0.0
                 last_playback_key: tuple[int, bool, int, int, int | None] | None = None
                 next_cover_check = 0.0
                 last_cover_error: str | None = None
                 last_volume_error: str | None = None
                 track_id = next_id
+                missing_since: float | None = None
 
                 while client.is_connected:
                     reading = await read_chrome_media(manager)
+                    if not has_usable_track(reading):
+                        if args.once:
+                            print("Chrome media session not found; start playback first.")
+                            return 1
+                        if missing_since is None:
+                            missing_since = time.monotonic()
+                        if time.monotonic() - missing_since < MISSING_SESSION_GRACE:
+                            await asyncio.sleep(args.interval)
+                            continue
+                        reading = None
+                    else:
+                        missing_since = None
                     try:
                         volume_percent = get_volume_percent()
                         last_volume_error = None
@@ -628,27 +744,88 @@ async def bridge(args: argparse.Namespace, manager: SessionManager) -> int:
                         if error != last_volume_error:
                             print(f"Windows volume unavailable: {error}")
                             last_volume_error = error
-                    if args.once and reading is None:
-                        print("Chrome media session not found; start playback first.")
-                        return 1
                     value = reading.metadata if reading else Metadata("", "", "")
                     metadata_changed = value != last_sent
+                    same_track = (
+                        last_sent is not None and reading is not None and
+                        track_key(value) == track_key(last_sent)
+                    )
                     if metadata_changed:
-                        active_track.track_id = None
-                        active_track.metadata = None
-                        track_id = next_id
+                        next_glyph_retry = 0.0
+                        if not same_track:
+                            active_track.track_id = None
+                            active_track.metadata = None
+                            track_id = next_id
+                        if reading is not None and glyph_characteristic is not None:
+                            try:
+                                desired_glyph_asset = build_glyph_asset(
+                                    value.title, value.artist, value.album
+                                )
+                            except Exception as exc:
+                                print(f"Unicode glyph rendering unavailable: "
+                                      f"{type(exc).__name__}: {exc}")
+                                desired_glyph_asset = None
+                            else:
+                                if (desired_glyph_asset is not None and
+                                        desired_glyph_asset.omitted_count):
+                                    print(f"Unicode glyph asset reached its limit; "
+                                          f"{desired_glyph_asset.omitted_count} "
+                                          "lower-priority glyphs omitted.")
+                        else:
+                            desired_glyph_asset = None
+                    if (glyph_characteristic is not None and
+                            desired_glyph_asset is not None and
+                            time.monotonic() >= next_glyph_retry and
+                            (sent_glyph_track_id != track_id or
+                             sent_glyph_payload != desired_glyph_asset.payload)):
+                        current_mtu = int(client.mtu_size)
+                        glyph_frame_size = min(
+                            MAX_COVER_FRAME_SIZE, max(20, current_mtu - 3)
+                        )
+                        fast_glyph_size = min(
+                            glyph_frame_size,
+                            int(getattr(glyph_characteristic,
+                                        "max_write_without_response_size",
+                                        glyph_frame_size)),
+                        )
+                        fast_glyph = (
+                            "write-without-response" in glyph_characteristic.properties
+                            and fast_glyph_size >= MIN_FAST_COVER_FRAME_SIZE
+                        )
+                        try:
+                            await send_glyphs(
+                                client, desired_glyph_asset, track_id,
+                                fast_glyph_size if fast_glyph else glyph_frame_size,
+                                fast=fast_glyph,
+                            )
+                        except Exception as exc:
+                            if not client.is_connected:
+                                raise
+                            error = f"{type(exc).__name__}: {exc}"
+                            if error != last_glyph_error:
+                                print(f"Unicode glyph transfer unavailable: {error}")
+                                last_glyph_error = error
+                            next_glyph_retry = time.monotonic() + 2.0
+                        else:
+                            sent_glyph_payload = desired_glyph_asset.payload
+                            sent_glyph_track_id = track_id
+                            last_glyph_error = None
+                    if metadata_changed:
                         await send_metadata(client, value, track_id)
                         active_track.track_id = track_id
                         active_track.metadata = value if reading else None
                         last_sent = value
-                        last_cover_key = _UNCHECKED
-                        next_cover_check = 0.0
-                        last_playback_key = await send_playback(
-                            client, reading.playback if reading else None, track_id,
-                            volume_percent,
-                        )
+                        if not same_track:
+                            last_cover_key = _UNCHECKED
+                            next_cover_check = 0.0
+                            last_playback_key = await send_playback(
+                                client, reading.playback if reading else None, track_id,
+                                volume_percent,
+                            )
                         if reading is None:
                             print("Sent empty metadata (no Chrome media session).")
+                        elif same_track:
+                            print(f"Updated album on track {track_id}: {value.album!r}")
                         else:
                             print(
                                 f"Sent: {value.title!r} / {value.artist!r} / "
@@ -672,7 +849,15 @@ async def bridge(args: argparse.Namespace, manager: SessionManager) -> int:
                                 digest = hashlib.sha256(raw).digest()
                                 changed = last_cover_key is _UNCHECKED or digest != last_cover_key
                                 if changed:
-                                    cover = convert_cover(raw)
+                                    cover = None
+                                    jpeg_cover = None
+                                    if jpeg_available:
+                                        try:
+                                            jpeg_cover = convert_cover_jpeg(raw)
+                                        except Exception as exc:
+                                            print(f"JPEG encoding skipped: {exc}")
+                                    if jpeg_cover is None:
+                                        cover = convert_cover(raw)
                             except Exception as exc:
                                 error = f"{type(exc).__name__}: {exc}"
                                 if error != last_cover_error:
@@ -701,11 +886,36 @@ async def bridge(args: argparse.Namespace, manager: SessionManager) -> int:
                                         fast_cover_available and
                                         fast_frame_size >= MIN_FAST_COVER_FRAME_SIZE
                                     )
-                                    await send_cover(
-                                        client, cover, track_id,
-                                        fast_frame_size if use_fast_cover else cover_frame_size,
-                                        fast=use_fast_cover,
-                                    )
+                                    jpeg_sent = False
+                                    if jpeg_cover is not None:
+                                        try:
+                                            await send_jpeg_cover(
+                                                client, jpeg_cover, track_id,
+                                                fast_frame_size if use_fast_cover
+                                                else cover_frame_size,
+                                                fast=use_fast_cover,
+                                            )
+                                        except Exception as exc:
+                                            if not client.is_connected:
+                                                raise
+                                            jpeg_available = False
+                                            print(
+                                                f"JPEG cover unavailable "
+                                                f"({type(exc).__name__}: {exc}); "
+                                                "using RGB565 compatibility mode."
+                                            )
+                                            await asyncio.sleep(0.10)
+                                        else:
+                                            jpeg_sent = True
+                                    if not jpeg_sent:
+                                        if cover is None:
+                                            cover = convert_cover(raw)
+                                        await send_cover(
+                                            client, cover, track_id,
+                                            fast_frame_size if use_fast_cover
+                                            else cover_frame_size,
+                                            fast=use_fast_cover,
+                                        )
                                     last_cover_key = digest
                                     cover_action_sent = True
                                 last_cover_error = None
@@ -718,7 +928,7 @@ async def bridge(args: argparse.Namespace, manager: SessionManager) -> int:
                             client, reading.playback if reading else None,
                             track_id, volume_percent,
                         )
-                    if metadata_changed:
+                    if metadata_changed and not same_track:
                         next_id = (next_id + 1) & 0xFF
                     if args.once:
                         return 0

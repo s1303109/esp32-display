@@ -1,0 +1,17 @@
+ESP32 音樂顯示器：Windows 11 64 位元快速開始
+
+目前已燒好同版韌體的 ESP32：
+1. 先把本 ZIP 完整解壓縮，進入 music_pc_bridge 資料夾。
+2. 雙擊 setup_music_display.cmd。若電腦缺少相容 Python，會自動從 Python 官方網站下載、驗證並安裝；也會安裝必要套件。第一次需有網路。
+3. 安裝完成後，保持 ESP32 通電、開啟藍牙，在 Google Chrome 播放 YouTube Music。背景橋接程式會自動連線，不需保留終端機視窗。
+4. 在 Chrome 切換歌曲，確認 TFT 歌名、封面、背景一起更新。中文、日文、韓文及帶重音字母（例如 telepatía 的 í）需搭配本包內的同版 ESP32 韌體；可用觸控按鍵、進度條與 Windows 主音量控制。
+
+給另一台電腦／另一塊 ESP32：
+- Windows 11 x64 先照上面雙擊 setup_music_display.cmd；電腦安裝與螢幕尺寸無關。
+- 若 ESP32 還沒有本專案韌體，僅在板子也是 ESP32-S3-WROOM-1-N16R8、螢幕為 ILI9341 240×320 SPI、觸控為 XPT2046 且接線和 FLASHING.md 完全相同時，才雙擊選用的 flash_firmware.cmd。
+- 螢幕大小、驅動晶片或接線不同時，不適用隨附的韌體映像；需針對該硬體重新編譯。
+
+停用背景連線：雙擊 disable_background.cmd。
+診斷前景執行：雙擊 start_music_display.cmd，關閉視窗後背景版會恢復。
+背景記錄：%LOCALAPPDATA%\ESP32MusicDisplay\bridge.log
+詳細說明：README.md、FLASHING.md。

@@ -19,6 +19,7 @@ SOURCE_FILES = (
     "background.pyw",
     "bridge.py",
     "cover.py",
+    "glyphs.py",
     "timeline.py",
     "wire.py",
     "volume.py",
@@ -70,6 +71,10 @@ def install() -> Path:
         raise RuntimeError("This installer must run on Windows")
 
     source = Path(__file__).resolve().parent
+    font_source = source / "fonts"
+    for filename in ("NotoSansCJK-Regular.ttc", "OFL.txt"):
+        if not (font_source / filename).is_file():
+            raise RuntimeError(f"Unicode font asset is missing: {font_source / filename}")
     destination = require_folder("LOCALAPPDATA") / APP_NAME
     startup = (
         require_folder("APPDATA")
@@ -93,6 +98,10 @@ def install() -> Path:
     stop_background(destination)
     for filename in SOURCE_FILES:
         shutil.copy2(source / filename, destination / filename)
+    shutil.copytree(font_source, destination / "fonts", dirs_exist_ok=True)
+    (destination / "python_path.txt").write_text(
+        str(Path(sys.executable).resolve()), encoding="utf-8"
+    )
 
     command = f'"{pythonw}" "{destination / "background.pyw"}"'
     launcher = startup / LAUNCHER_NAME

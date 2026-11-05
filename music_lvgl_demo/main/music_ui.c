@@ -520,6 +520,18 @@ void music_ui_set_play_state(music_ui_t *ui, uint8_t state)
     lv_obj_invalidate(ui->play_icon);
 }
 
+void music_ui_set_text_fonts(music_ui_t *ui, const lv_font_t *title_font,
+                             const lv_font_t *secondary_font)
+{
+    if (ui == NULL || title_font == NULL || secondary_font == NULL) return;
+    lv_obj_set_style_text_font(ui->title, title_font, 0);
+    lv_obj_set_style_text_font(ui->artist, secondary_font, 0);
+    lv_obj_set_style_text_font(ui->source, secondary_font, 0);
+    lv_obj_invalidate(ui->title);
+    lv_obj_invalidate(ui->artist);
+    lv_obj_invalidate(ui->source);
+}
+
 void music_ui_set_playback(music_ui_t *ui, uint8_t state, bool timeline_valid,
                            uint32_t elapsed_ms, uint32_t duration_ms)
 {

@@ -14,6 +14,8 @@ from collections.abc import Iterator
 
 VERSION = 1
 FAST_COVER_VERSION = 2
+JPEG_COVER_VERSION = 3
+GLYPH_VERSION = 4
 HEADER_SIZE = 6
 MAX_FRAME_SIZE = 20
 MAX_PAYLOAD_SIZE = MAX_FRAME_SIZE - HEADER_SIZE
@@ -57,7 +59,8 @@ def make_frames(
     """
     if not 0 <= message_id <= 255:
         raise ValueError("message_id must be 0..255")
-    if version not in (VERSION, FAST_COVER_VERSION):
+    if version not in (VERSION, FAST_COVER_VERSION, JPEG_COVER_VERSION,
+                       GLYPH_VERSION):
         raise ValueError("unsupported frame version")
     if not HEADER_SIZE < max_frame_size <= 244:
         raise ValueError("max_frame_size must be 7..244 bytes")
@@ -80,14 +83,18 @@ def make_frames(
         yield header + payload[offset : offset + chunk_size]
 
 
-def make_fast_cover_commit(payload: bytes, image_id: int) -> bytes:
-    """Commit all version 2 cover fragments after the ESP verifies CRC32."""
+def make_fast_cover_commit(
+    payload: bytes, image_id: int, *, version: int = FAST_COVER_VERSION
+) -> bytes:
+    """Commit v2/v3 cover or v4 glyph fragments after CRC32 verification."""
     if not payload or len(payload) > 65535:
         raise ValueError("fast cover size must be 1..65535 bytes")
     if not 0 <= image_id <= 255:
         raise ValueError("image_id must be 0..255")
+    if version not in (FAST_COVER_VERSION, JPEG_COVER_VERSION, GLYPH_VERSION):
+        raise ValueError("commit version must be 2, 3, or 4")
     size = len(payload)
     return struct.pack(
-        "<BBHHI", FAST_COVER_VERSION, image_id, size, size,
+        "<BBHHI", version, image_id, size, size,
         zlib.crc32(payload) & 0xFFFFFFFF,
     )

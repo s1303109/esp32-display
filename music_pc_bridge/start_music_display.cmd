@@ -3,12 +3,7 @@ setlocal
 chcp 65001 >nul
 set PYTHONIOENCODING=utf-8
 cd /d "%~dp0"
-echo Preparing the Windows music bridge...
-py -m pip install --user -r requirements.txt
-if errorlevel 1 goto failed
-echo.
-echo Connecting to the ESP32 music display. Keep this window open.
-py bridge.py
+"%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe" -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup_music_display.ps1" -Mode Foreground
 if errorlevel 1 goto failed
 exit /b 0
 

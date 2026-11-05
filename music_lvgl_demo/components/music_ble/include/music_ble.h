@@ -20,13 +20,31 @@ typedef struct {
 #define MUSIC_BLE_COVER_WIDTH 130
 #define MUSIC_BLE_COVER_HEIGHT 130
 #define MUSIC_BLE_COVER_BYTES (MUSIC_BLE_COVER_WIDTH * MUSIC_BLE_COVER_HEIGHT * 2)
+#define MUSIC_BLE_JPEG_MAX_BYTES 32768
+
+typedef enum {
+    MUSIC_BLE_COVER_FORMAT_CLEAR = 0,
+    MUSIC_BLE_COVER_FORMAT_RGB565 = 1,
+    MUSIC_BLE_COVER_FORMAT_JPEG = 2,
+} music_ble_cover_format_t;
 
 typedef struct {
-    /* RGB565 pixels in little-endian byte order. NULL and size 0 mean clear. */
+    /* RGB565 pixels or compressed JPEG bytes. NULL/0 means clear. */
     const uint8_t *pixels;
     size_t size;
     uint8_t image_id;
+    music_ble_cover_format_t format;
 } music_ble_cover_t;
+
+#define MUSIC_BLE_GLYPH_MAX_BYTES 32768
+#define MUSIC_BLE_GLYPH_MAX_COUNT 192
+
+typedef struct {
+    /* CRC-verified GLY1 asset. Copy or parse before the next asset arrives. */
+    const uint8_t *data;
+    size_t size;
+    uint8_t track_id;
+} music_ble_glyph_asset_t;
 
 typedef struct {
     uint8_t track_id;
@@ -56,10 +74,14 @@ esp_err_t music_ble_start(void);
 /* Call only from the LVGL owner task, then update LVGL objects there. */
 bool music_ble_try_get_update(music_ble_metadata_t *out);
 
-/* Returns the newest completed cover. The returned PSRAM pointer stays valid
- * until another cover replaces it; never free or write through it. Call from
- * the LVGL owner task only. */
+/* Returns a CRC-verified JPEG, a complete RGB565 image, or a clear update.
+ * The returned PSRAM pointer stays valid until another cover replaces it;
+ * never free or write through it. Call from the LVGL owner task only. */
 bool music_ble_try_get_cover(music_ble_cover_t *out);
+
+/* Returns the newest complete GLY1 bitmap-font asset. The PSRAM source is
+ * read-only and remains stable until another glyph asset replaces it. */
+bool music_ble_try_get_glyph_asset(music_ble_glyph_asset_t *out);
 
 /* Return the most recent playback/timeline update. Call from the LVGL owner
  * task; use track_id to discard updates for a different metadata track. */

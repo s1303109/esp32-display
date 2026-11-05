@@ -42,10 +42,13 @@ display module's existing 3V3 and GND supply.
 - ILI9341 SPI: 40 MHz, tested on the replacement display.
 - XPT2046-compatible touch SPI: independent SPI3 at 2 MHz, IRQ on GPIO21.
 - LVGL 9.2: RGB565 partial rendering with two 20,480-byte internal DMA buffers.
-- 130×130 RGB565 album art: PSRAM transfer and display buffers. The image changes only after a complete, validated BLE transfer arrives.
+- Song changes compose a complete 320×240 frame in a 153,600-byte PSRAM DMA buffer, then `esp_lcd` streams it in 20,480-byte SPI chunks without LVGL render pauses. This was verified on the current panel after a single oversized DMA transfer caused its lower half to turn white.
+- 130×130 album art: the PC normally sends a quality-88 baseline JPEG; the ESP32 checks its length and CRC, decodes it into a PSRAM RGB565 display buffer, and changes the art only after a complete image arrives. The older RGB565 transfer remains supported.
 - BLE device name: `ESP32-Music-Display`.
 - BLE requests a 7.5–15 ms connection interval, with a 15–30 ms fallback. The Windows PC decides the actual interval. The earlier write-with-response path measured 3.23 seconds for 33,800 bytes at 11.25 ms and MTU 247. After installing the new bridge, one live serial capture measured about 0.69 seconds from BLE metadata arrival to the complete 33,800-byte cover event; the user also confirmed visibly faster artwork. This is one observed end-to-end interval, not a guaranteed transfer rate.
 - Fast cover transfer: version 2 chunks use GATT write without response; a final write with response carries CRC32. The image appears only if the expected byte count, offsets, and checksum match. The Windows helper retries with the version 1 write-with-response path if the fast attempt fails.
+- JPEG cover transfer: version 3 uses the same fast-fragment/CRC pattern with up to 32,768 bytes of compressed data. One live capture measured about 0.22 seconds from metadata arrival to a verified 8,330-byte JPEG cover; this is one observation, not a guaranteed transfer rate. The user confirmed visibly faster cover changes and no obvious top-to-bottom screen sweep.
+- Dynamic text glyphs: version 4 carries up to 32,768 bytes of track-specific A4 glyph assets, verified by CRC32 before use. The Windows bridge renders Chinese, Japanese, Korean, and accented Latin glyphs from its bundled Noto TTC and sends them before song metadata. LVGL keeps the existing title, artist, and album labels, with Montserrat as the fallback for characters absent from the asset. Older bridge versions continue to use the built-in fonts; the app partition remains unchanged.
 
 Build and flash with ESP-IDF 5.5.1:
 
@@ -57,8 +60,8 @@ idf.py -p /dev/ttyACM0 flash
 ## 手動驗收
 
 1. 燒入韌體，在播放 YouTube Music 的 Windows 11 電腦安裝同版背景橋接套件。既有背景版可直接用新版 `install_background.cmd` 升級。
-2. 播放歌曲並切換下一首；確認歌名先更新，封面與單色背景隨新封面更新，且進度與時間繼續變動。
+2. 播放歌曲並切換下一首；確認歌名、封面與單色背景一起更新，且進度與時間繼續變動。
 3. 點上一首、播放／暫停、下一首，確認電腦真的執行，且右下角不出現指令文字。拖動歌曲進度條至另一位置後放開，確認 Chrome 跳轉並回報新時間。點上方喇叭，拖動滑桿，確認 Windows 音量顯示跟著變動；也從 Windows 調整音量，確認滑桿回報正確。
 4. 若畫面顯示 `PC OFFLINE` 或歌曲未切換，查看電腦上的 `%LOCALAPPDATA%\ESP32MusicDisplay\bridge.log`。背景連線不需要保持終端機視窗開啟。
 
-觸控 X/Y 校正使用這塊螢幕的實測四角資料；若更換觸控面板或旋轉方向，需要重新校正。預設 LVGL 字型尚未完整涵蓋中日韓文字；若要廣泛顯示 CJK，需另外加入字型並檢查 app 分割區容量。
+觸控 X/Y 校正使用這塊螢幕的實測四角資料；若更換觸控面板或旋轉方向，需要重新校正。中文字與特殊符號由同版 Windows 橋接程式按歌曲傳送字形；未提供字形、超過 32 KiB 或字庫不支援的字元會沿用 LVGL 的內建字型或缺字佔位符，不需擴大目前的 app 分割區。

@@ -1,7 +1,7 @@
 {
     "version":            "1.2",
     "project_name":       "music_lvgl_demo",
-    "project_version":    "1",
+    "project_version":    "0b9f21f-dirty",
     "project_path":       "/workspace/music_lvgl_demo",
     "idf_path":           "/opt/esp/idf",
     "build_dir":          "/workspace/music_lvgl_demo/build",
@@ -1270,7 +1270,7 @@
             "managed_reqs": [],
             "managed_priv_reqs": [ "espressif__esp_lcd_ili9341", "lvgl__lvgl" ],
             "file": "/workspace/music_lvgl_demo/build/esp-idf/main/libmain.a",
-            "sources": [ "/workspace/music_lvgl_demo/main/main.c", "/workspace/music_lvgl_demo/main/music_ui.c", "/workspace/music_lvgl_demo/main/touch_xpt2046.c" ],
+            "sources": [ "/workspace/music_lvgl_demo/main/main.c", "/workspace/music_lvgl_demo/main/music_ui.c", "/workspace/music_lvgl_demo/main/touch_xpt2046.c", "/workspace/music_lvgl_demo/main/glyph_asset.c", "/workspace/music_lvgl_demo/main/glyph_font.c" ],
             "include_dirs": [ "." ]
         },
         "mbedtls": {

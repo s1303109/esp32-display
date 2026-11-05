@@ -50,6 +50,11 @@ void music_ui_preview_seek(music_ui_t *ui, uint32_t elapsed_ms,
 // progress slider and timeline labels untouched while a seek is pending.
 void music_ui_set_play_state(music_ui_t *ui, uint8_t state);
 
+// Swap text fonts before publishing a track's labels. The title uses title_font;
+// artist and album/source use secondary_font. Existing layout is preserved.
+void music_ui_set_text_fonts(music_ui_t *ui, const lv_font_t *title_font,
+                             const lv_font_t *secondary_font);
+
 // Update the volume slider from a Windows volume report. This programmatic
 // value update does not dispatch the slider's user VALUE_CHANGED event.
 void music_ui_set_volume(music_ui_t *ui, uint8_t percent);

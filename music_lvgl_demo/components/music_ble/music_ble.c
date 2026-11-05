@@ -21,6 +21,8 @@
 #define DEVICE_NAME "ESP32-Music-Display"
 #define FRAME_VERSION 1
 #define COVER_FAST_VERSION 2
+#define COVER_JPEG_VERSION 3
+#define GLYPH_VERSION 4
 #define FRAME_HEADER_LEN 6
 #define COVER_FAST_COMMIT_LEN 10
 #define MAX_METADATA_LEN 512
@@ -59,6 +61,10 @@ static const ble_uuid128_t metadata_uuid = BLE_UUID128_INIT(
 static const ble_uuid128_t cover_uuid = BLE_UUID128_INIT(
     0x17, 0xac, 0x45, 0x11, 0xf8, 0x19, 0x2a, 0xa3,
     0xf2, 0x4d, 0x19, 0xea, 0x2f, 0xfb, 0x60, 0x0e);
+/* 9e74967b-6875-4000-8477-f25b93b58861 */
+static const ble_uuid128_t glyph_uuid = BLE_UUID128_INIT(
+    0x61, 0x88, 0xb5, 0x93, 0x5b, 0xf2, 0x77, 0x84,
+    0x00, 0x40, 0x75, 0x68, 0x7b, 0x96, 0x74, 0x9e);
 /* 9c950662-05e7-4e55-a39e-0658ccb0c8fb */
 static const ble_uuid128_t playback_uuid = BLE_UUID128_INIT(
     0xfb, 0xc8, 0xb0, 0xcc, 0x58, 0x06, 0x9e, 0xa3,
@@ -70,6 +76,7 @@ static const ble_uuid128_t control_uuid = BLE_UUID128_INIT(
 
 static QueueHandle_t s_updates;
 static QueueHandle_t s_cover_updates;
+static QueueHandle_t s_glyph_updates;
 static QueueHandle_t s_playback_updates;
 static uint8_t s_own_addr_type;
 static uint16_t s_connected_handle = BLE_HS_CONN_HANDLE_NONE;
@@ -87,20 +94,35 @@ static enum {
     CONN_PARAM_DONE,
 } s_conn_param_state;
 static uint8_t *s_cover_buffers[2];
+static uint8_t *s_glyph_buffers[2];
 static portMUX_TYPE s_cover_lock = portMUX_INITIALIZER_UNLOCKED;
 /* -1 means none. -2 means a clear-cover update is pending. */
 static int8_t s_cover_active_index = -1;
 static int8_t s_cover_pending_index = -1;
+static portMUX_TYPE s_glyph_lock = portMUX_INITIALIZER_UNLOCKED;
+static int8_t s_glyph_active_index = -1;
+static int8_t s_glyph_pending_index = -1;
 
 /* Only the NimBLE host task writes this reassembly state. */
 static struct {
     uint16_t conn_handle;
     uint16_t received;
+    uint16_t total_len;
     uint8_t image_id;
     uint8_t version;
     int8_t index;
     bool active;
 } s_cover_rx;
+
+/* Only the NimBLE host task writes this version-4 reassembly state. */
+static struct {
+    uint16_t conn_handle;
+    uint16_t received;
+    uint16_t total_len;
+    uint8_t track_id;
+    int8_t index;
+    bool active;
+} s_glyph_rx;
 
 /* GAP and GATT callbacks run on the NimBLE host task; no LVGL calls here. */
 static struct {
@@ -200,12 +222,16 @@ static int metadata_access(uint16_t conn_handle, uint16_t attr_handle,
     return 0;
 }
 
-static int queue_cover_update(int8_t index, uint8_t image_id)
+static int queue_cover_update(int8_t index, uint8_t image_id,
+                              uint8_t version, uint16_t total_len)
 {
     music_ble_cover_t update = {
         .pixels = index >= 0 ? s_cover_buffers[index] : NULL,
-        .size = index >= 0 ? MUSIC_BLE_COVER_BYTES : 0,
+        .size = index >= 0 ? total_len : 0,
         .image_id = image_id,
+        .format = index < 0 ? MUSIC_BLE_COVER_FORMAT_CLEAR :
+                  version == COVER_JPEG_VERSION ? MUSIC_BLE_COVER_FORMAT_JPEG :
+                                                  MUSIC_BLE_COVER_FORMAT_RGB565,
     };
 
     portENTER_CRITICAL(&s_cover_lock);
@@ -255,7 +281,8 @@ static int cover_access(uint16_t conn_handle, uint16_t attr_handle,
         return BLE_ATT_ERR_UNLIKELY;
     }
     const uint8_t version = frame[0];
-    if (version != FRAME_VERSION && version != COVER_FAST_VERSION) {
+    if (version != FRAME_VERSION && version != COVER_FAST_VERSION &&
+        version != COVER_JPEG_VERSION) {
         return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
     }
 
@@ -267,23 +294,26 @@ static int cover_access(uint16_t conn_handle, uint16_t attr_handle,
             return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
         }
         s_cover_rx.active = false;
-        return queue_cover_update(-2, image_id);
+        return queue_cover_update(-2, image_id, version, 0);
     }
     /* A failed fast transfer may leave write commands queued in Windows.
      * Once reliable v1 recovery has begun, ignore any late v2 frames rather
      * than letting them reset or corrupt the recovery assembly. */
     if (s_cover_rx.active && s_cover_rx.version == FRAME_VERSION &&
-        s_cover_rx.conn_handle == conn_handle && version == COVER_FAST_VERSION) {
+        s_cover_rx.conn_handle == conn_handle && version != FRAME_VERSION) {
         return BLE_ATT_ERR_INVALID_OFFSET;
     }
     /* Fast write commands are committed by one write request carrying the
      * CRC32. The image remains hidden until every byte is verified. */
-    if (version == COVER_FAST_VERSION && offset == total_len) {
+    if (version != FRAME_VERSION && offset == total_len) {
         if (frame_len != COVER_FAST_COMMIT_LEN ||
-            total_len != MUSIC_BLE_COVER_BYTES ||
+            (version == COVER_FAST_VERSION && total_len != MUSIC_BLE_COVER_BYTES) ||
+            (version == COVER_JPEG_VERSION &&
+             (total_len < 4 || total_len > MUSIC_BLE_JPEG_MAX_BYTES)) ||
             !s_cover_rx.active || s_cover_rx.version != version ||
             s_cover_rx.conn_handle != conn_handle ||
             s_cover_rx.image_id != image_id ||
+            s_cover_rx.total_len != total_len ||
             s_cover_rx.received != total_len) {
             s_cover_rx.active = false;
             return BLE_ATT_ERR_INVALID_OFFSET;
@@ -292,19 +322,23 @@ static int cover_access(uint16_t conn_handle, uint16_t attr_handle,
                                       ((uint32_t)frame[7] << 8) |
                                       ((uint32_t)frame[8] << 16) |
                                       ((uint32_t)frame[9] << 24);
-        const uint32_t actual_crc = cover_crc32(s_cover_buffers[s_cover_rx.index],
-                                                 MUSIC_BLE_COVER_BYTES);
+        const uint32_t actual_crc =
+            cover_crc32(s_cover_buffers[s_cover_rx.index], total_len);
         if (actual_crc != expected_crc) {
             ESP_LOGW(TAG, "fast cover CRC mismatch: got=%08lx expected=%08lx",
                      (unsigned long)actual_crc, (unsigned long)expected_crc);
             s_cover_rx.active = false;
             return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
         }
-        const int result = queue_cover_update(s_cover_rx.index, image_id);
+        const int result = queue_cover_update(s_cover_rx.index, image_id,
+                                              version, total_len);
         if (result == 0) s_cover_rx.active = false;
         return result;
     }
-    if (total_len != MUSIC_BLE_COVER_BYTES || frame_len == FRAME_HEADER_LEN ||
+    if ((version != COVER_JPEG_VERSION && total_len != MUSIC_BLE_COVER_BYTES) ||
+        (version == COVER_JPEG_VERSION &&
+         (total_len < 4 || total_len > MUSIC_BLE_JPEG_MAX_BYTES)) ||
+        frame_len == FRAME_HEADER_LEN ||
         offset >= total_len || frame_len - FRAME_HEADER_LEN > total_len - offset) {
         s_cover_rx.active = false;
         return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
@@ -320,6 +354,7 @@ static int cover_access(uint16_t conn_handle, uint16_t attr_handle,
         }
         s_cover_rx.conn_handle = conn_handle;
         s_cover_rx.received = 0;
+        s_cover_rx.total_len = total_len;
         s_cover_rx.image_id = image_id;
         s_cover_rx.version = version;
         s_cover_rx.index = active_index == 0 ? 1 : 0;
@@ -327,6 +362,7 @@ static int cover_access(uint16_t conn_handle, uint16_t attr_handle,
     }
     if (!s_cover_rx.active || s_cover_rx.conn_handle != conn_handle ||
         s_cover_rx.image_id != image_id || s_cover_rx.version != version ||
+        s_cover_rx.total_len != total_len ||
         offset != s_cover_rx.received) {
         s_cover_rx.active = false;
         return BLE_ATT_ERR_INVALID_OFFSET;
@@ -338,8 +374,117 @@ static int cover_access(uint16_t conn_handle, uint16_t attr_handle,
     s_cover_rx.received += chunk_len;
     if (version == FRAME_VERSION && s_cover_rx.received == MUSIC_BLE_COVER_BYTES) {
         s_cover_rx.active = false;
-        return queue_cover_update(s_cover_rx.index, image_id);
+        return queue_cover_update(s_cover_rx.index, image_id, version, total_len);
     }
+    return 0;
+}
+
+static int queue_glyph_update(int8_t index, uint8_t track_id,
+                              uint16_t total_len)
+{
+    music_ble_glyph_asset_t update = {
+        .data = s_glyph_buffers[index],
+        .size = total_len,
+        .track_id = track_id,
+    };
+    portENTER_CRITICAL(&s_glyph_lock);
+    if (s_glyph_pending_index != -1) {
+        portEXIT_CRITICAL(&s_glyph_lock);
+        return BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+    s_glyph_pending_index = index;
+    portEXIT_CRITICAL(&s_glyph_lock);
+    if (xQueueSend(s_glyph_updates, &update, 0) != pdPASS) {
+        portENTER_CRITICAL(&s_glyph_lock);
+        s_glyph_pending_index = -1;
+        portEXIT_CRITICAL(&s_glyph_lock);
+        return BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+    return 0;
+}
+
+static int glyph_access(uint16_t conn_handle, uint16_t attr_handle,
+                        struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)attr_handle;
+    (void)arg;
+    if (ctxt->op != BLE_GATT_ACCESS_OP_WRITE_CHR) {
+        return BLE_ATT_ERR_REQ_NOT_SUPPORTED;
+    }
+    const uint16_t frame_len = OS_MBUF_PKTLEN(ctxt->om);
+    if (frame_len < FRAME_HEADER_LEN || frame_len > MAX_GATT_FRAME_LEN) {
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+    uint8_t frame[MAX_GATT_FRAME_LEN];
+    if (ble_hs_mbuf_to_flat(ctxt->om, frame, sizeof(frame), NULL) != 0) {
+        return BLE_ATT_ERR_UNLIKELY;
+    }
+    if (frame[0] != GLYPH_VERSION) return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
+
+    const uint8_t track_id = frame[1];
+    const uint16_t offset = (uint16_t)frame[2] | ((uint16_t)frame[3] << 8);
+    const uint16_t total_len = (uint16_t)frame[4] | ((uint16_t)frame[5] << 8);
+    if (total_len < 6 || total_len > MUSIC_BLE_GLYPH_MAX_BYTES) {
+        s_glyph_rx.active = false;
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+    if (offset == total_len) {
+        if (frame_len != COVER_FAST_COMMIT_LEN || !s_glyph_rx.active ||
+            s_glyph_rx.conn_handle != conn_handle ||
+            s_glyph_rx.track_id != track_id ||
+            s_glyph_rx.total_len != total_len ||
+            s_glyph_rx.received != total_len) {
+            s_glyph_rx.active = false;
+            return BLE_ATT_ERR_INVALID_OFFSET;
+        }
+        const uint8_t *data = s_glyph_buffers[s_glyph_rx.index];
+        const uint32_t count = (uint32_t)data[4] | ((uint32_t)data[5] << 8);
+        if (memcmp(data, "GLY1", 4) != 0 ||
+            count > MUSIC_BLE_GLYPH_MAX_COUNT) {
+            s_glyph_rx.active = false;
+            return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
+        }
+        const uint32_t expected_crc = (uint32_t)frame[6] |
+                                      ((uint32_t)frame[7] << 8) |
+                                      ((uint32_t)frame[8] << 16) |
+                                      ((uint32_t)frame[9] << 24);
+        if (cover_crc32(data, total_len) != expected_crc) {
+            s_glyph_rx.active = false;
+            return BLE_ATT_ERR_VALUE_NOT_ALLOWED;
+        }
+        const int result = queue_glyph_update(s_glyph_rx.index, track_id,
+                                              total_len);
+        if (result == 0) s_glyph_rx.active = false;
+        return result;
+    }
+    if (frame_len == FRAME_HEADER_LEN || offset >= total_len ||
+        frame_len - FRAME_HEADER_LEN > total_len - offset) {
+        s_glyph_rx.active = false;
+        return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+    }
+    if (offset == 0) {
+        portENTER_CRITICAL(&s_glyph_lock);
+        const int8_t pending_index = s_glyph_pending_index;
+        const int8_t active_index = s_glyph_active_index;
+        portEXIT_CRITICAL(&s_glyph_lock);
+        if (pending_index != -1) return BLE_ATT_ERR_INSUFFICIENT_RES;
+        s_glyph_rx.conn_handle = conn_handle;
+        s_glyph_rx.received = 0;
+        s_glyph_rx.total_len = total_len;
+        s_glyph_rx.track_id = track_id;
+        s_glyph_rx.index = active_index == 0 ? 1 : 0;
+        s_glyph_rx.active = true;
+    }
+    if (!s_glyph_rx.active || s_glyph_rx.conn_handle != conn_handle ||
+        s_glyph_rx.track_id != track_id ||
+        s_glyph_rx.total_len != total_len || offset != s_glyph_rx.received) {
+        s_glyph_rx.active = false;
+        return BLE_ATT_ERR_INVALID_OFFSET;
+    }
+    const uint16_t chunk_len = frame_len - FRAME_HEADER_LEN;
+    memcpy(s_glyph_buffers[s_glyph_rx.index] + offset,
+           frame + FRAME_HEADER_LEN, chunk_len);
+    s_glyph_rx.received += chunk_len;
     return 0;
 }
 
@@ -421,6 +566,11 @@ static const struct ble_gatt_svc_def services[] = {
             {
                 .uuid = &cover_uuid.u,
                 .access_cb = cover_access,
+                .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
+            },
+            {
+                .uuid = &glyph_uuid.u,
+                .access_cb = glyph_access,
                 .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_NO_RSP,
             },
             {
@@ -508,6 +658,7 @@ static int gap_event(struct ble_gap_event *event, void *arg)
     case BLE_GAP_EVENT_DISCONNECT:
         s_assembly.active = false;
         s_cover_rx.active = false;
+        s_glyph_rx.active = false;
         s_connected_handle = BLE_HS_CONN_HANDLE_NONE;
         portENTER_CRITICAL(&s_control_state_lock);
         s_control_conn_handle = BLE_HS_CONN_HANDLE_NONE;
@@ -614,14 +765,21 @@ esp_err_t music_ble_start(void)
     }
 
     s_cover_updates = xQueueCreate(1, sizeof(music_ble_cover_t));
+    s_glyph_updates = xQueueCreate(1, sizeof(music_ble_glyph_asset_t));
     s_playback_updates = xQueueCreate(1, sizeof(music_ble_playback_t));
     s_cover_buffers[0] = heap_caps_malloc(MUSIC_BLE_COVER_BYTES,
                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     s_cover_buffers[1] = heap_caps_malloc(MUSIC_BLE_COVER_BYTES,
                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (s_cover_updates == NULL || s_playback_updates == NULL ||
+    s_glyph_buffers[0] = heap_caps_malloc(MUSIC_BLE_GLYPH_MAX_BYTES,
+                                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    s_glyph_buffers[1] = heap_caps_malloc(MUSIC_BLE_GLYPH_MAX_BYTES,
+                                           MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (s_cover_updates == NULL || s_glyph_updates == NULL ||
+        s_playback_updates == NULL ||
         s_cover_buffers[0] == NULL ||
-        s_cover_buffers[1] == NULL) {
+        s_cover_buffers[1] == NULL ||
+        s_glyph_buffers[0] == NULL || s_glyph_buffers[1] == NULL) {
         err = ESP_ERR_NO_MEM;
         goto fail_queue;
     }
@@ -668,6 +826,14 @@ esp_err_t music_ble_start(void)
     return ESP_OK;
 
 fail_queue:
+    if (s_glyph_buffers[0] != NULL) {
+        heap_caps_free(s_glyph_buffers[0]);
+        s_glyph_buffers[0] = NULL;
+    }
+    if (s_glyph_buffers[1] != NULL) {
+        heap_caps_free(s_glyph_buffers[1]);
+        s_glyph_buffers[1] = NULL;
+    }
     if (s_cover_buffers[0] != NULL) {
         heap_caps_free(s_cover_buffers[0]);
         s_cover_buffers[0] = NULL;
@@ -679,6 +845,10 @@ fail_queue:
     if (s_cover_updates != NULL) {
         vQueueDelete(s_cover_updates);
         s_cover_updates = NULL;
+    }
+    if (s_glyph_updates != NULL) {
+        vQueueDelete(s_glyph_updates);
+        s_glyph_updates = NULL;
     }
     if (s_playback_updates != NULL) {
         vQueueDelete(s_playback_updates);
@@ -712,6 +882,25 @@ bool music_ble_try_get_cover(music_ble_cover_t *out)
     }
     s_cover_pending_index = -1;
     portEXIT_CRITICAL(&s_cover_lock);
+    return true;
+}
+
+bool music_ble_try_get_glyph_asset(music_ble_glyph_asset_t *out)
+{
+    if (s_glyph_updates == NULL || out == NULL ||
+        xQueueReceive(s_glyph_updates, out, 0) != pdPASS) {
+        return false;
+    }
+    portENTER_CRITICAL(&s_glyph_lock);
+    if (out->data == s_glyph_buffers[0]) {
+        s_glyph_active_index = 0;
+    } else if (out->data == s_glyph_buffers[1]) {
+        s_glyph_active_index = 1;
+    } else {
+        s_glyph_active_index = -1;
+    }
+    s_glyph_pending_index = -1;
+    portEXIT_CRITICAL(&s_glyph_lock);
     return true;
 }
 
