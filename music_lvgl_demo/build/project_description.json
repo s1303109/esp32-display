@@ -1,7 +1,7 @@
 {
     "version":            "1.2",
     "project_name":       "music_lvgl_demo",
-    "project_version":    "0b9f21f-dirty",
+    "project_version":    "aa74d35-dirty",
     "project_path":       "/workspace/music_lvgl_demo",
     "idf_path":           "/opt/esp/idf",
     "build_dir":          "/workspace/music_lvgl_demo/build",
