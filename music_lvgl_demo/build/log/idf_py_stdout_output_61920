@@ -1,0 +1,126 @@
+Command: /opt/esp/python_env/idf5.5_py3.12_env/bin/python /opt/esp/idf/tools/idf_monitor.py -p /dev/ttyACM0 -b 115200 --toolchain-prefix xtensa-esp32s3-elf- --target esp32s3 --revision 0 /workspace/music_lvgl_demo/build/music_lvgl_demo.elf /workspace/music_lvgl_demo/build/bootloader/bootloader.elf -m '/opt/esp/python_env/idf5.5_py3.12_env/bin/python' '/opt/esp/idf/tools/idf.py' '-p' '/dev/ttyACM0'
+ESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0x1 (POWERON),boot:0x8 (SPI_FAST_FLASH_BOOT)
+SPIWP:0xee
+mode:DIO, clock div:1
+load:0x3fce2820,len:0x158c
+load:0x403c8700,len:0xd24
+load:0x403cb700,len:0x2f34
+entry 0x403c8924
+[0;32mI (24) boot: ESP-IDF v5.5.1 2nd stage bootloader[0m
+[0;32mI (25) boot: compile time Nov  4 2026 17:37:53[0m
+[0;32mI (25) boot: Multicore bootloader[0m
+[0;32mI (25) boot: chip revision: v0.2[0m
+[0;32mI (28) boot: efuse block revision: v1.3[0m
+[0;32mI (31) boot.esp32s3: Boot SPI Speed : 80MHz[0m
+[0;32mI (35) boot.esp32s3: SPI Mode       : DIO[0m
+[0;32mI (39) boot.esp32s3: SPI Flash Size : 16MB[0m
+[0;32mI (43) boot: Enabling RNG early entropy source...[0m
+[0;32mI (47) boot: Partition Table:[0m
+[0;32mI (50) boot: ## Label            Usage          Type ST Offset   Length[0m
+[0;32mI (56) boot:  0 nvs              WiFi data        01 02 00009000 00006000[0m
+[0;32mI (63) boot:  1 phy_init         RF data          01 01 0000f000 00001000[0m
+[0;32mI (69) boot:  2 factory          factory app      00 00 00010000 00100000[0m
+[0;32mI (76) boot: End of partition table[0m
+[0;32mI (79) esp_image: segment 0: paddr=00010020 vaddr=3c0a0020 size=21950h (137552) map[0m
+[0;32mI (111) esp_image: segment 1: paddr=00031978 vaddr=3fc9c600 size=047ech ( 18412) load[0m
+[0;32mI (115) esp_image: segment 2: paddr=0003616c vaddr=40374000 size=09each ( 40620) load[0m
+[0;32mI (124) esp_image: segment 3: paddr=00040020 vaddr=42000020 size=96bc4h (617412) map[0m
+[0;32mI (233) esp_image: segment 4: paddr=000d6bec vaddr=4037deac size=0e6b4h ( 59060) load[0m
+[0;32mI (246) esp_image: segment 5: paddr=000e52a8 vaddr=50000000 size=00020h (    32) load[0m
+[0;32mI (256) boot: Loaded app from partition at offset 0x10000[0m
+[0;32mI (256) boot: Disabling RNG early entropy source...[0m
+[0;32mI (266) octal_psram: vendor id    : 0x0d (AP)[0m
+[0;32mI (267) octal_psram: dev id       : 0x02 (generation 3)[0m
+[0;32mI (267) octal_psram: density      : 0x03 (64 Mbit)[0m
+[0;32mI (269) octal_psram: good-die     : 0x01 (Pass)[0m
+[0;32mI (273) octal_psram: Latency      : 0x01 (Fixed)[0m
+[0;32mI (277) octal_psram: VCC          : 0x01 (3V)[0m
+[0;32mI (281) octal_psram: SRF          : 0x01 (Fast Refresh)[0m
+[0;32mI (286) octal_psram: BurstType    : 0x01 (Hybrid Wrap)[0m
+[0;32mI (291) octal_psram: BurstLen     : 0x01 (32 Byte)[0m
+[0;32mI (296) octal_psram: Readlatency  : 0x02 (10 cycles@Fixed)[0m
+[0;32mI (301) octal_psram: DriveStrength: 0x00 (1/1)[0m
+[0;32mI (306) MSPI Timing: PSRAM timing tuning index: 11[0m
+[0;32mI (310) esp_psram: Found 8MB PSRAM device[0m
+[0;32mI (313) esp_psram: Speed: 80MHz[0m
+[0;32mI (316) cpu_start: Multicore app[0m
+[0;32mI (732) esp_psram: SPI SRAM memory test OK[0m
+[0;32mI (741) cpu_start: Pro cpu start user code[0m
+[0;32mI (741) cpu_start: cpu freq: 240000000 Hz[0m
+[0;32mI (741) app_init: Application information:[0m
+[0;32mI (741) app_init: Project name:     music_lvgl_demo[0m
+[0;32mI (746) app_init: App version:      1[0m
+[0;32mI (749) app_init: Compile time:     Nov  5 2026 16:30:08[0m
+[0;32mI (754) app_init: ELF file SHA256:  fde17018f...[0m
+[0;32mI (759) app_init: ESP-IDF:          v5.5.1[0m
+[0;32mI (762) efuse_init: Min chip rev:     v0.0[0m
+[0;32mI (766) efuse_init: Max chip rev:     v0.99 [0m
+[0;32mI (770) efuse_init: Chip rev:         v0.2[0m
+[0;32mI (774) heap_init: Initializing. RAM available for dynamic allocation:[0m
+[0;32mI (780) heap_init: At 3FCB32F0 len 00036420 (217 KiB): RAM[0m
+[0;32mI (785) heap_init: At 3FCE9710 len 00005724 (21 KiB): RAM[0m
+[0;32mI (791) heap_init: At 3FCF0000 len 00008000 (32 KiB): DRAM[0m
+[0;32mI (796) heap_init: At 600FE000 len 00001FE8 (7 KiB): RTCRAM[0m
+[0;32mI (801) esp_psram: Adding pool of 8192K of PSRAM memory to heap allocator[0m
+[0;32mI (808) spi_flash: detected chip: gd[0m
+[0;32mI (811) spi_flash: flash io: dio[0m
+[0;32mI (814) sleep_gpio: Configure to isolate all GPIO pins in sleep state[0m
+[0;32mI (820) sleep_gpio: Enable automatic switching of GPIO sleep configuration[0m
+[0;32mI (827) coexist: coex firmware version: b0bcc39[0m
+[0;32mI (851) coexist: coexist rom version e7ae62f[0m
+[0;32mI (0) main_task: Started on CPU1[0m
+[0;32mI (10) esp_psram: Reserving pool of 64K of internal memory for DMA/internal allocations[0m
+[0;32mI (10) main_task: Calling app_main()[0m
+[0;32mI (10) music_demo: PSRAM: ready, free=8386156 bytes[0m
+[0;32mI (10) ili9341: LCD panel create success, version: 2.1.0[0m
+[0;32mI (170) BLE_INIT: BT controller compile version [2edb0b0][0m
+[0;32mI (170) BLE_INIT: Using main XTAL as clock source[0m
+[0;32mI (170) BLE_INIT: Feature Config, ADV:1, BLE_50:1, DTM:1, SCAN:1, CCA:0, SMP:1, CONNECT:1[0m
+[0;32mI (1213) BLE_INIT: Bluetooth MAC: dc:da:0c:18:19:6e[0m
+[0;32mI (1223) phy_init: phy_version 701,f4f1da3a,Mar  3 2025,15:50:10[0m
+[0;32mI (1253) music_ble: advertising as ESP32-Music-Display[0m
+[0;32mI (1253) music_demo: LVGL 320x240 ready; SPI=40 MHz; DMA buffers=20480 bytes each[0m
+[0;32mI (1263) music_demo: Internal free=151827, minimum=151811, largest block=63488[0m
+[0;32mI (1263) NimBLE: GAP procedure initiated: stop advertising.[0m
+
+[0;32mI (1273) NimBLE: Failed to restore IRKs from store; status=8[0m
+
+[0;32mI (1273) NimBLE: GAP procedure initiated: advertise; [0m
+[0;32mI (1283) NimBLE: disc_mode=2[0m
+[0;32mI (1283) NimBLE:  adv_channel_map=0 own_addr_type=0 adv_filter_policy=0 adv_itvl_min=0 adv_itvl_max=0[0m
+[0;32mI (1293) NimBLE: [0m
+
+[0;32mI (7713) music_ble: ATT MTU=247, handle=1[0m
+[0;32mI (7723) music_ble: connected, handle=1[0m
+[0;32mI (7723) music_ble: connected: interval=11.250 ms, latency=0, timeout=4000 ms[0m
+[0;32mI (7723) NimBLE: GAP procedure initiated: [0m
+[0;32mI (7723) NimBLE: connection parameter update; conn_handle=1 itvl_min=6 itvl_max=12 latency=0 supervision_timeout=400 min_ce_len=0 max_ce_len=0[0m
+[0;32mI (7743) NimBLE: [0m
+
+[0;32mI (7743) music_ble: requested 7.5-15 ms connection interval, latency 0[0m
+[0;32mI (7743) music_ble: PHY: TX=1 RX=1 (1=1M, 2=2M, 3=Coded)[0m
+[0;32mI (8313) music_ble: control notifications enabled[0m
+[0;32mI (8383) music_demo: BLE metadata: EXCUSE ME / AOA / AOA 1st Album ANGEL'S KNOCK[0m
+[0;32mI (9983) NimBLE: GATT procedure initiated: notify; [0m
+[0;32mI (9983) NimBLE: att_handle=22[0m
+
+[0;32mI (9983) music_ble: control notification queued: command=2[0m
+[0;32mI (9983) music_demo: PLAY/PAUSE queued[0m
+[0;32mI (11863) music_demo: BLE cover: 33800 bytes, id=34[0m
+[0;32mI (13583) NimBLE: GATT procedure initiated: notify; [0m
+[0;32mI (13583) NimBLE: att_handle=22[0m
+
+[0;32mI (13583) music_ble: control notification queued: command=2[0m
+[0;32mI (13583) music_demo: PLAY/PAUSE queued[0m
+[0;32mI (14383) NimBLE: GATT procedure initiated: notify; [0m
+[0;32mI (14383) NimBLE: att_handle=22[0m
+
+[0;32mI (14383) music_ble: control notification queued: command=2[0m
+[0;32mI (14383) music_demo: PLAY/PAUSE queued[0m
+[0;32mI (15563) NimBLE: GATT procedure initiated: notify; [0m
+[0;32mI (15563) NimBLE: att_handle=22[0m
+
+[0;32mI (15563) music_ble: control notification queued: command=2[0m
+[0;32mI (15563) music_demo: PLAY/PAUSE queued[0m

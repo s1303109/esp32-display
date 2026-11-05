@@ -1,0 +1,2 @@
+source /workspace/music_lvgl_demo/build/bootloader/gdbinit/symbols
+source /workspace/music_lvgl_demo/build/bootloader/gdbinit/connect

@@ -1,0 +1,9 @@
+
+
+# Load bootloader symbols
+set confirm off
+    add-symbol-file /workspace/music_lvgl_demo/build/bootloader/bootloader.elf
+set confirm on
+
+# Load application symbols
+file /workspace/music_lvgl_demo/build/music_lvgl_demo.elf

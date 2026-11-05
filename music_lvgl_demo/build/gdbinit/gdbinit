@@ -1,0 +1,2 @@
+source /workspace/music_lvgl_demo/build/gdbinit/symbols
+source /workspace/music_lvgl_demo/build/gdbinit/connect

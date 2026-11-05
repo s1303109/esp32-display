@@ -1,0 +1,4 @@
+bleak==3.0.2
+winrt-Windows.Media.Control==4!10.0.28000.2957
+winrt-Windows.Media==4!10.0.28000.2957
+Pillow==13.0.0
